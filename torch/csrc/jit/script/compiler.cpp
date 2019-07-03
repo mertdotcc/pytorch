@@ -591,9 +591,10 @@ struct to_ir {
     CompilationUnit cu;
     // set optimize to false since we don't need to run it in optimize mode
     cu.set_optimized(false);
-    cu.define({def}, {resolver}, nullptr);
+    const auto qualname = QualifiedName("<anon>.defaults");
+    cu.define({qualname}, {def}, {resolver}, nullptr);
     Stack stack;
-    cu.get_function("defaults").run(stack);
+    cu.get_function(qualname).run(stack);
     return stack.at(0).toTuple()->elements();
   }
 
@@ -2953,16 +2954,15 @@ struct FunctionResolver : public Resolver {
 CompilationUnit::CompilationUnit(const std::string& source)
     : CompilationUnit() {
   // calles the define with native resolver to generate the graph for functions
-  define(source, nativeResolver(), nullptr);
+  define(c10::nullopt, source, nativeResolver(), nullptr);
 }
 
 std::unique_ptr<Function> CompilationUnit::define(
+    const QualifiedName& name,
     const Def& def,
     const ResolverPtr& resolver,
     const Self& self,
-    const std::unordered_map<std::string, Function*>&
-        function_table) const {
-  const std::string& name = def.name().name();
+    const std::unordered_map<std::string, Function*>& function_table) const {
   TORCH_INTERNAL_ASSERT(resolver);
   auto _resolver = resolver;
   if (!self) {
@@ -2980,10 +2980,12 @@ std::unique_ptr<Function> CompilationUnit::define(
 }
 
 void CompilationUnit::define(
+    const std::vector<QualifiedName>& names,
     const std::vector<Def>& definitions,
     const std::vector<ResolverPtr>& resolvers,
     const Self& self) {
-  AT_ASSERT(definitions.size() == resolvers.size());
+  TORCH_INTERNAL_ASSERT(definitions.size() == resolvers.size());
+  TORCH_INTERNAL_ASSERT(definitions.size() == names.size());
   // We need to compile `__init__` first, since it can determine what attributes
   // are available to other methods. So reorder the definitions accordingly.
   c10::optional<size_t> init_idx;
@@ -3000,7 +3002,11 @@ void CompilationUnit::define(
   if (init_idx.has_value()) {
     // if we have an init, do it first.
     auto fn = define(
-        definitions[*init_idx], resolvers[*init_idx], self, function_table);
+        names[*init_idx],
+        definitions[*init_idx],
+        resolvers[*init_idx],
+        self,
+        function_table);
     const auto& name = fn->name();
     function_table[name] = fn.get();
     methods.push_back(fn.get());
@@ -3013,7 +3019,8 @@ void CompilationUnit::define(
       continue;
     }
 
-    auto fn = define(definitions[i], resolvers[i], self, function_table);
+    auto fn =
+        define(names[i], definitions[i], resolvers[i], self, function_table);
     const auto& name = fn->name();
     function_table[name] = fn.get();
     methods.push_back(fn.get());
@@ -3026,18 +3033,23 @@ void CompilationUnit::define(
 }
 
 void CompilationUnit::define(
+    const c10::optional<QualifiedName>& prefix,
     const std::string& source,
     const ResolverPtr& resolver,
     const Self& self) {
   Parser p(std::make_shared<Source>(source, "<string>", 1));
+  std::vector<QualifiedName> names;
   std::vector<Def> definitions;
   std::vector<ResolverPtr> resolvers;
   while (p.lexer().cur().kind != TK_EOF) {
     auto def = Def(p.parseFunction(/*is_method=*/bool(self)));
+    auto name = prefix ? QualifiedName(*prefix, def.name().name())
+                       : QualifiedName(def.name().name());
+    names.push_back(std::move(name));
     definitions.push_back(def);
     resolvers.push_back(resolver);
   }
-  define(definitions, resolvers, self);
+  define(names, definitions, resolvers, self);
 }
 
 void runCleanupPasses(std::shared_ptr<Graph>& to_clean, bool convert_ssa) {
